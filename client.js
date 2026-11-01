@@ -91,6 +91,23 @@ window.__ModuleLoader__.load({
       'diff.binary': '二进制文件，无法显示差异。',
       'diff.empty': '没有可显示的文本差异。',
       'diff.truncated': '差异过大，只显示了前面的部分。',
+      'diff.renamed': '文件已重命名，内容没有变化。',
+      'diff.modeOnly': '只有文件权限发生了变化。',
+      'diff.mode': '差异视图',
+      'diff.unified': '单栏',
+      'diff.split': '双栏',
+      'diff.fullTitle': '显示完整文件 / 只显示更改附近',
+      'diff.prev': '上一个文件',
+      'diff.next': '下一个文件',
+      'diff.close': '关闭差异',
+      'diff.resize': '拖动调整宽度',
+      'rev.index': '暂存区',
+      'rev.worktree': '工作区',
+      'rev.none': '（无）',
+      'side.index': '已暂存',
+      'side.worktree': '工作区',
+      'side.untracked': '未跟踪',
+      'side.conflict': '冲突',
       'status.M': '已修改',
       'status.A': '已添加',
       'status.D': '已删除',
@@ -178,6 +195,23 @@ window.__ModuleLoader__.load({
       'diff.binary': 'Binary file; no diff to show.',
       'diff.empty': 'No textual differences.',
       'diff.truncated': 'The diff is large; only the beginning is shown.',
+      'diff.renamed': 'Renamed without content changes.',
+      'diff.modeOnly': 'Only the file mode changed.',
+      'diff.mode': 'Diff view',
+      'diff.unified': 'Inline',
+      'diff.split': 'Side by side',
+      'diff.fullTitle': 'Show whole file / only around changes',
+      'diff.prev': 'Previous file',
+      'diff.next': 'Next file',
+      'diff.close': 'Close diff',
+      'diff.resize': 'Drag to resize',
+      'rev.index': 'Index',
+      'rev.worktree': 'Working tree',
+      'rev.none': '(none)',
+      'side.index': 'Staged',
+      'side.worktree': 'Working tree',
+      'side.untracked': 'Untracked',
+      'side.conflict': 'Conflict',
       'status.M': 'Modified',
       'status.A': 'Added',
       'status.D': 'Deleted',
@@ -299,6 +333,8 @@ window.__ModuleLoader__.load({
     const IconFetch = () => icon([h('path', { key: 1, d: 'M4.5 11.5a3 3 0 0 1-.3-6 4 4 0 0 1 7.6.6 2.7 2.7 0 0 1 0 5.4' }), h('path', { key: 2, d: 'M8 8v5.5M6 11.5l2 2 2-2' })]);
     const IconSync = () => icon([h('path', { key: 1, d: 'M12.5 2.5v3h-3M3.5 13.5v-3h3' }), h('path', { key: 2, d: 'M12.3 5.5A5 5 0 0 0 3.2 7M12.8 9a5 5 0 0 1-9.1 1.5' })]);
     const IconCheck = () => icon([h('path', { key: 1, d: 'M3 8.5 6.5 12 13 4.5' })]);
+    const IconClose = () => icon([h('path', { key: 1, d: 'M4 4l8 8M12 4l-8 8' })]);
+    const IconExpand = () => icon([h('path', { key: 1, d: 'M8 1.8v4.4M6 4.2l2 2 2-2M8 14.2V9.8M6 11.8l2-2 2 2M2.5 8h11' })]);
     const IconChevron = ({ open }) => h('svg', {
       width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': true,
       className: `dshgit-chevron${open ? ' dshgit-chevron-open' : ''}`,
@@ -341,72 +377,225 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
-    /* Diff                                                                */
+    /* Diff model                                                          */
     /* ------------------------------------------------------------------ */
 
-    function DiffView({ cwd, entry, group, stamp, t }) {
-      const [state, setState] = useState({ phase: 'loading' });
-      useEffect(() => {
-        let live = true;
-        call('diff', { cwd, path: entry.path, staged: group === 'staged', untracked: group === 'changes' && entry.status === 'U' })
-          .then((value) => { if (live) setState({ phase: 'ready', value }); })
-          .catch((error) => { if (live) setState({ phase: 'error', error }); });
-        return () => { live = false; };
-      }, [cwd, entry.path, entry.status, group, stamp]);
-      if (state.phase === 'loading') return h('div', { className: 'dshgit-diff-note' }, t('diff.loading'));
-      if (state.phase === 'error') return h('div', { className: 'dshgit-diff-note dshgit-error-text' }, errorText(t, state.error));
-      const { value } = state;
-      if (value.binary) return h('div', { className: 'dshgit-diff-note' }, t('diff.binary'));
-      const lines = [];
+    const DIFF_HEADER = /^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|dissimilarity index|rename from|rename to|copy from|copy to|old mode|new mode|\\ No newline)/;
+
+    /** Unified patch text → hunks of { kind, text, a, b } lines. */
+    function parseDiff(text) {
+      const hunks = [];
+      let current = null;
       let oldNo = 0;
       let newNo = 0;
-      for (const line of value.text.split('\n')) {
-        if (/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename from|rename to|old mode|new mode|\\ No newline)/.test(line)) continue;
-        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-        if (hunk) {
-          oldNo = Number(hunk[1]);
-          newNo = Number(hunk[2]);
-          lines.push({ kind: 'hunk', text: line, a: '', b: '' });
-        } else if (line.startsWith('@@')) {
-          newNo = 1;
-          lines.push({ kind: 'hunk', text: line, a: '', b: '' });
-        } else if (line.startsWith('+')) {
-          lines.push({ kind: 'add', text: line.slice(1), a: '', b: newNo++ });
-        } else if (line.startsWith('-')) {
-          lines.push({ kind: 'del', text: line.slice(1), a: oldNo++, b: '' });
-        } else if (line.startsWith(' ')) {
-          lines.push({ kind: 'ctx', text: line.slice(1), a: oldNo++, b: newNo++ });
+      for (const line of text.split('\n')) {
+        if (DIFF_HEADER.test(line)) continue;
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line);
+        if (hunk || line.startsWith('@@')) {
+          oldNo = hunk ? Number(hunk[1]) : 1;
+          newNo = hunk ? Number(hunk[2]) : 1;
+          current = { header: line, lines: [] };
+          hunks.push(current);
+          continue;
+        }
+        if (current === null) continue;
+        if (line.startsWith('+')) current.lines.push({ kind: 'add', text: line.slice(1), a: '', b: newNo++ });
+        else if (line.startsWith('-')) current.lines.push({ kind: 'del', text: line.slice(1), a: oldNo++, b: '' });
+        else if (line.startsWith(' ')) current.lines.push({ kind: 'ctx', text: line.slice(1), a: oldNo++, b: newNo++ });
+      }
+      return hunks;
+    }
+
+    /** Group a hunk's lines into context lines and change blocks (deletions followed by additions). */
+    function blocksOf(lines) {
+      const out = [];
+      let i = 0;
+      while (i < lines.length) {
+        if (lines[i].kind === 'ctx') {
+          out.push({ type: 'ctx', line: lines[i] });
+          i += 1;
+          continue;
+        }
+        const dels = [];
+        const adds = [];
+        while (i < lines.length && lines[i].kind === 'del') dels.push(lines[i++]);
+        while (i < lines.length && lines[i].kind === 'add') adds.push(lines[i++]);
+        out.push({ type: 'change', dels, adds });
+      }
+      return out;
+    }
+
+    /** Changed span between two similar lines (common prefix and suffix trimmed), or null. */
+    function inlineSpan(a, b) {
+      if (a.length > 2000 || b.length > 2000) return null;
+      const max = Math.min(a.length, b.length);
+      let p = 0;
+      while (p < max && a[p] === b[p]) p += 1;
+      let s = 0;
+      while (s < max - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s += 1;
+      if (p === a.length && p === b.length) return null;
+      const shorter = Math.min(a.length, b.length);
+      if (shorter > 6 && p + s < shorter * 0.35) return null;
+      return {
+        a: [a.slice(0, p), a.slice(p, a.length - s), a.slice(a.length - s)],
+        b: [b.slice(0, p), b.slice(p, b.length - s), b.slice(b.length - s)],
+      };
+    }
+
+    function codeContent(text, parts) {
+      if (!parts || parts[1] === '') return text === '' ? ' ' : text;
+      return [parts[0], h('mark', { key: 'm', className: 'dshgit-inline' }, parts[1]), parts[2]];
+    }
+
+    function UnifiedTable({ hunks }) {
+      const rows = [];
+      hunks.forEach((hunk, hi) => {
+        rows.push(h('tr', { key: `h${hi}`, className: 'dshgit-diff-hunk' }, h('td', { colSpan: 4 }, hunk.header)));
+        blocksOf(hunk.lines).forEach((block, bi) => {
+          if (block.type === 'ctx') {
+            const l = block.line;
+            rows.push(h('tr', { key: `${hi}:${bi}`, className: 'dshgit-diff-ctx' },
+              h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-no' }, l.b),
+              h('td', { className: 'dshgit-diff-sign' }), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text))));
+            return;
+          }
+          const pairs = Math.min(block.dels.length, block.adds.length);
+          const spans = [];
+          for (let k = 0; k < pairs; k += 1) spans.push(inlineSpan(block.dels[k].text, block.adds[k].text));
+          block.dels.forEach((l, k) => rows.push(h('tr', { key: `${hi}:${bi}:d${k}`, className: 'dshgit-diff-del' },
+            h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-no' }),
+            h('td', { className: 'dshgit-diff-sign' }, '-'), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text, spans[k]?.a)))));
+          block.adds.forEach((l, k) => rows.push(h('tr', { key: `${hi}:${bi}:a${k}`, className: 'dshgit-diff-add' },
+            h('td', { className: 'dshgit-diff-no' }), h('td', { className: 'dshgit-diff-no' }, l.b),
+            h('td', { className: 'dshgit-diff-sign' }, '+'), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text, spans[k]?.b)))));
+        });
+      });
+      return h('table', { className: 'dshgit-diff-table dshgit-diff-unified' }, h('tbody', null, rows));
+    }
+
+    function SplitTable({ hunks, leftLabel, rightLabel }) {
+      const rows = [];
+      const side = (line, kind, parts, key) => {
+        const edge = key === 'r' ? ' dshgit-split-right' : '';
+        const cell = line ? `dshgit-cell-${kind}` : 'dshgit-cell-empty';
+        return [
+          h('td', { key: `${key}n`, className: `dshgit-diff-no ${cell}${edge}` }, line ? (kind === 'add' ? line.b : line.a) : null),
+          h('td', { key: `${key}c`, className: `dshgit-diff-code ${cell}` }, line ? codeContent(line.text, parts) : null),
+        ];
+      };
+      hunks.forEach((hunk, hi) => {
+        rows.push(h('tr', { key: `h${hi}`, className: 'dshgit-diff-hunk' }, h('td', { colSpan: 4 }, hunk.header)));
+        blocksOf(hunk.lines).forEach((block, bi) => {
+          if (block.type === 'ctx') {
+            const l = block.line;
+            rows.push(h('tr', { key: `${hi}:${bi}` },
+              h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text)),
+              h('td', { className: 'dshgit-diff-no dshgit-split-right' }, l.b), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text))));
+            return;
+          }
+          const n = Math.max(block.dels.length, block.adds.length);
+          for (let k = 0; k < n; k += 1) {
+            const d = block.dels[k];
+            const a = block.adds[k];
+            const span = d && a ? inlineSpan(d.text, a.text) : null;
+            rows.push(h('tr', { key: `${hi}:${bi}:${k}` }, ...side(d, 'del', span?.a, 'l'), ...side(a, 'add', span?.b, 'r')));
+          }
+        });
+      });
+      return h('table', { className: 'dshgit-diff-table dshgit-diff-split' },
+        h('colgroup', null, h('col', { className: 'dshgit-col-no' }), h('col'), h('col', { className: 'dshgit-col-no' }), h('col')),
+        h('thead', null, h('tr', null,
+          h('th', { colSpan: 2 }, leftLabel),
+          h('th', { colSpan: 2, className: 'dshgit-split-right' }, rightLabel))),
+        h('tbody', null, rows));
+    }
+
+    const readPref = (key, fallback) => { try { return localStorage.getItem(`dsh-git-tree.${key}`) ?? fallback; } catch { return fallback; } };
+    const writePref = (key, value) => { try { localStorage.setItem(`dsh-git-tree.${key}`, String(value)); } catch { /* ignore */ } };
+
+    /** The diff pane to the right of the change list. */
+    function DiffPane({ cwd, entry, group, stamp, mode, setMode, full, setFull, onOpen, onPrev, onNext, onClose, t }) {
+      const [state, setState] = useState({ phase: 'loading' });
+      const untracked = group === 'changes' && entry.status === 'U';
+      useEffect(() => {
+        let live = true;
+        setState((current) => (current.phase === 'ready' && current.path === entry.path && current.group === group ? current : { phase: 'loading' }));
+        call('diff', { cwd, path: entry.path, orig: entry.orig, staged: group === 'staged', untracked, context: full ? 'full' : 'near' })
+          .then((value) => { if (live) setState({ phase: 'ready', value, path: entry.path, group }); })
+          .catch((error) => { if (live) setState({ phase: 'error', error }); });
+        return () => { live = false; };
+      }, [cwd, entry.path, entry.orig, entry.status, group, untracked, full, stamp]);
+
+      const letter = statusLetter(entry, group);
+      const revs = group === 'staged'
+        ? [entry.status === 'A' ? t('rev.none') : 'HEAD', entry.status === 'D' ? t('rev.none') : t('rev.index')]
+        : group === 'conflicts'
+          ? [t('rev.index'), t('rev.worktree')]
+          : [untracked ? t('rev.none') : t('rev.index'), entry.status === 'D' ? t('rev.none') : t('rev.worktree')];
+      const leftLabel = entry.orig ? `${revs[0]} · ${entry.orig}` : revs[0];
+      const chip = group === 'staged' ? t('side.index') : group === 'conflicts' ? t('side.conflict') : untracked ? t('side.untracked') : t('side.worktree');
+
+      let content;
+      if (state.phase === 'loading') content = h('div', { className: 'dshgit-diff-note' }, t('diff.loading'));
+      else if (state.phase === 'error') content = h('div', { className: 'dshgit-diff-note dshgit-error-text' }, errorText(t, state.error));
+      else if (state.value.binary) content = h('div', { className: 'dshgit-diff-note' }, t('diff.binary'));
+      else {
+        const hunks = parseDiff(state.value.text);
+        if (hunks.length === 0) {
+          const renamed = /^rename from /m.test(state.value.text) || entry.orig !== undefined;
+          const modeOnly = /^old mode /m.test(state.value.text);
+          content = h('div', { className: 'dshgit-diff-note' }, t(renamed ? 'diff.renamed' : modeOnly ? 'diff.modeOnly' : 'diff.empty'));
+        }
+        else {
+          content = h(React.Fragment, null,
+            state.value.truncated && h('div', { className: 'dshgit-diff-note' }, t('diff.truncated')),
+            mode === 'split' ? h(SplitTable, { hunks, leftLabel, rightLabel: revs[1] }) : h(UnifiedTable, { hunks }));
         }
       }
-      if (lines.length === 0) return h('div', { className: 'dshgit-diff-note' }, t('diff.empty'));
-      return h('div', { className: 'dshgit-diff' },
-        value.truncated && h('div', { className: 'dshgit-diff-note' }, t('diff.truncated')),
-        h('div', { className: 'dshgit-diff-scroll' },
-          h('table', { className: 'dshgit-diff-table' },
-            h('tbody', null, lines.map((line, index) => h('tr', { key: index, className: `dshgit-diff-${line.kind}` },
-              h('td', { className: 'dshgit-diff-no' }, line.kind === 'hunk' ? '' : line.a),
-              h('td', { className: 'dshgit-diff-no' }, line.kind === 'hunk' ? '' : line.b),
-              h('td', { className: 'dshgit-diff-sign' }, line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ''),
-              h('td', { className: 'dshgit-diff-code' }, line.text || ' ')))))));
+
+      const seg = (value, label) => h('button', {
+        type: 'button',
+        className: `dshgit-seg${mode === value ? ' dshgit-seg-on' : ''}`,
+        'aria-pressed': mode === value,
+        onClick: () => setMode(value),
+      }, label);
+
+      return h('div', { className: 'dshgit-diffpane', role: 'region', 'aria-label': entry.path },
+        h('div', { className: 'dshgit-diffbar' },
+          h('span', { className: `dshgit-letter dshgit-letter-${STATUS_CLASS[letter] || 'mod'}` }, letter),
+          h('span', { className: 'dshgit-diff-title', title: entry.orig ? `${entry.orig} → ${entry.path}` : entry.path },
+            h('span', { className: 'dshgit-name' }, baseName(entry.path)),
+            dirName(entry.path) !== '' && h('span', { className: 'dshgit-dir' }, dirName(entry.path))),
+          h('span', { className: 'dshgit-chip' }, chip),
+          h('span', { className: 'dshgit-spacer' }),
+          h('span', { className: 'dshgit-segs', role: 'group', 'aria-label': t('diff.mode') }, seg('unified', t('diff.unified')), seg('split', t('diff.split'))),
+          h(ToolButton, { label: t('diff.fullTitle'), onClick: () => setFull(!full), className: full ? 'dshgit-tool-on' : '' }, h(IconExpand)),
+          h(ToolButton, { label: t('diff.prev'), onClick: onPrev, disabled: !onPrev }, h(IconUp)),
+          h(ToolButton, { label: t('diff.next'), onClick: onNext, disabled: !onNext }, h(IconDown)),
+          onOpen && h(ToolButton, { label: t('action.open'), onClick: onOpen }, h(IconOpen)),
+          h(ToolButton, { label: t('diff.close'), onClick: onClose }, h(IconClose))),
+        h('div', { className: `dshgit-diff-scroll${mode === 'split' ? ' dshgit-wrap' : ''}` }, content));
     }
 
     /* ------------------------------------------------------------------ */
     /* File rows and groups                                                */
     /* ------------------------------------------------------------------ */
 
-    function FileRow({ entry, group, open, onToggle, actions, disabled, cwd, stamp, t }) {
+    function FileRow({ entry, group, selected, onSelect, actions, disabled, rowKey, t }) {
       const letter = statusLetter(entry, group);
       const statusLabel = group === 'conflicts' ? t('status.conflict') : t(`status.${entry.status}`);
       const dir = dirName(entry.path);
       return h('li', { className: 'dshgit-file-item' },
         h('div', {
-          className: `dshgit-row dshgit-file${open ? ' dshgit-row-open' : ''}`,
-          role: 'button',
-          tabIndex: 0,
-          'aria-expanded': open,
+          className: `dshgit-row dshgit-file${selected ? ' dshgit-row-selected' : ''}`,
+          role: 'option',
+          tabIndex: selected ? 0 : -1,
+          'aria-selected': selected,
+          'data-file-key': rowKey,
           title: `${entry.path}${entry.orig ? ` ← ${entry.orig}` : ''} · ${statusLabel}`,
-          onClick: onToggle,
-          onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle(); } },
+          onClick: onSelect,
+          onDoubleClick: actions.open,
+          onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(); } },
         },
         h('span', { className: `dshgit-name${letter === 'D' ? ' dshgit-deleted' : ''}` }, baseName(entry.path)),
         dir !== '' && h('span', { className: 'dshgit-dir' }, dir),
@@ -416,8 +605,7 @@ window.__ModuleLoader__.load({
           actions.discard && h(ToolButton, { label: t('action.discard'), onClick: actions.discard, disabled }, h(IconDiscard)),
           actions.stage && h(ToolButton, { label: t('action.stage'), onClick: actions.stage, disabled }, h(IconPlus)),
           actions.unstage && h(ToolButton, { label: t('action.unstage'), onClick: actions.unstage, disabled }, h(IconMinus))),
-        h('span', { className: `dshgit-letter dshgit-letter-${STATUS_CLASS[letter] || 'mod'}`, title: statusLabel }, letter)),
-        open && h(DiffView, { cwd, entry, group, stamp, t }));
+        h('span', { className: `dshgit-letter dshgit-letter-${STATUS_CLASS[letter] || 'mod'}`, title: statusLabel }, letter)));
     }
 
     function Group({ id, title, entries, collapsed, onCollapse, groupActions, renderFile, disabled, t }) {
@@ -510,8 +698,49 @@ window.__ModuleLoader__.load({
       const [message, setMessageState] = useState(() => drafts.get(sessionId) ?? '');
       const [amend, setAmend] = useState(false);
       const [collapsed, setCollapsed] = useState({});
-      const [openDiff, setOpenDiff] = useState(null);
+      const [selected, setSelected] = useState(null);
       const [diffBump, setDiffBump] = useState(0);
+      const [mode, setModeState] = useState(() => (readPref('diffMode', 'split') === 'unified' ? 'unified' : 'split'));
+      const [full, setFullState] = useState(() => readPref('fullFile', 'false') === 'true');
+      const [listWidth, setListWidth] = useState(() => {
+        const n = Number(readPref('listWidth', '320'));
+        return Number.isFinite(n) ? Math.min(800, Math.max(200, n)) : 320;
+      });
+      const [narrow, setNarrow] = useState(false);
+      const rootRef = useRef(null);
+      const setMode = (value) => { writePref('diffMode', value); setModeState(value); };
+      const setFull = (value) => { writePref('fullFile', value); setFullState(value); };
+
+      useEffect(() => {
+        const el = rootRef.current;
+        if (el === null || typeof ResizeObserver === 'undefined') return undefined;
+        const observer = new ResizeObserver(([entry]) => setNarrow(entry.contentRect.width < 560));
+        observer.observe(el);
+        return () => observer.disconnect();
+      }, [state.phase === 'ready' && state.data.repo]);
+
+      const startResize = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = listWidth;
+        const total = rootRef.current?.getBoundingClientRect().width ?? 1000;
+        let latest = startWidth;
+        const move = (e) => {
+          latest = Math.round(Math.min(Math.max(200, startWidth + e.clientX - startX), Math.max(240, total - 260)));
+          setListWidth(latest);
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+          document.body.style.removeProperty('cursor');
+          document.body.style.removeProperty('user-select');
+          writePref('listWidth', latest);
+        };
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+      };
       const [confirm, setConfirm] = useState(null);
       const [picker, setPicker] = useState(false);
       const seq = useRef(0);
@@ -620,14 +849,36 @@ window.__ModuleLoader__.load({
         setConfirm({ text, action: () => run('discard', one ? { paths: [one.path] } : { all: true }, 'busy.work') });
       };
 
-      const toggleDiff = (key) => setOpenDiff((current) => (current === key ? null : key));
+      const ordered = [
+        ...(collapsed.conflicts ? [] : conflicts.map((entry) => ({ entry, group: 'conflicts' }))),
+        ...(collapsed.staged ? [] : staged.map((entry) => ({ entry, group: 'staged' }))),
+        ...(collapsed.changes ? [] : changes.map((entry) => ({ entry, group: 'changes' }))),
+      ];
+      const keyOf = (item) => `${item.group}:${item.entry.path}`;
+      const allItems = [
+        ...conflicts.map((entry) => ({ entry, group: 'conflicts' })),
+        ...staged.map((entry) => ({ entry, group: 'staged' })),
+        ...changes.map((entry) => ({ entry, group: 'changes' })),
+      ];
+      // A selection survives a stage/unstage: fall back to the same path in another group.
+      const current = selected === null ? undefined
+        : allItems.find((item) => keyOf(item) === selected)
+          ?? allItems.find((item) => item.entry.path === selected.slice(selected.indexOf(':') + 1));
+      const currentKey = current ? keyOf(current) : null;
+      const index = current ? ordered.findIndex((item) => keyOf(item) === currentKey) : -1;
+      const step = (delta) => {
+        const target = ordered[index + delta];
+        if (!target) return undefined;
+        return () => {
+          setSelected(keyOf(target));
+          requestAnimationFrame(() => rootRef.current?.querySelector(`[data-file-key="${CSS.escape(keyOf(target))}"]`)?.scrollIntoView?.({ block: 'nearest' }));
+        };
+      };
+      const openFile = (entry) => (entry.status === 'D' ? undefined : () => tab.actions.openResource(fileAddress(sessionId, cwd, data.root, entry.path)));
 
       const renderFile = (entry, group) => {
         const key = `${group}:${entry.path}`;
-        const deleted = entry.status === 'D';
-        const actions = {
-          open: deleted ? undefined : () => tab.actions.openResource(fileAddress(sessionId, cwd, data.root, entry.path)),
-        };
+        const actions = { open: openFile(entry) };
         if (group === 'staged') actions.unstage = () => run('unstage', { paths: entry.orig ? [entry.path, entry.orig] : [entry.path] }, 'busy.work');
         if (group === 'changes') {
           actions.discard = () => askDiscard([entry]);
@@ -635,9 +886,9 @@ window.__ModuleLoader__.load({
         }
         if (group === 'conflicts') actions.stage = () => run('stage', { paths: [entry.path] }, 'busy.work');
         return h(FileRow, {
-          key, entry, group, cwd, stamp, t, disabled, actions,
-          open: openDiff === key,
-          onToggle: () => toggleDiff(key),
+          key, entry, group, t, disabled, actions, rowKey: key,
+          selected: currentKey === key,
+          onSelect: () => setSelected(currentKey === key ? null : key),
         });
       };
 
@@ -647,7 +898,44 @@ window.__ModuleLoader__.load({
       const showSync = !branch.detached && branch.upstream !== undefined && (branch.ahead > 0 || branch.behind > 0);
       const showPublish = !branch.detached && branch.upstream === undefined && hasRemote && data.hasCommits;
 
+      const showDiff = current !== undefined;
+      const listPane = (children) => h('div', {
+        className: 'dshgit-split',
+        'data-diff': showDiff ? (narrow ? 'stacked' : 'side') : 'none',
+        style: showDiff && !narrow ? { '--dshgit-list-width': `${listWidth}px` } : undefined,
+      },
+      h('div', {
+        className: 'dshgit-body',
+        role: 'listbox',
+        'aria-label': t('group.changes'),
+        onKeyDown: (event) => {
+          if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) return;
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            const go = step(event.key === 'ArrowDown' ? 1 : -1) ?? (index < 0 && ordered[0] ? () => setSelected(keyOf(ordered[0])) : undefined);
+            if (go) { event.preventDefault(); go(); }
+          } else if (event.key === 'Escape' && showDiff) {
+            setSelected(null);
+          }
+        },
+      }, ...children),
+      showDiff && !narrow && h('div', {
+        className: 'dshgit-splitter',
+        role: 'separator',
+        'aria-orientation': 'vertical',
+        title: t('diff.resize'),
+        onPointerDown: startResize,
+        onDoubleClick: () => { setListWidth(320); writePref('listWidth', 320); },
+      }),
+      showDiff && h(DiffPane, {
+        cwd, entry: current.entry, group: current.group, stamp, mode, setMode, full, setFull, t,
+        onOpen: openFile(current.entry),
+        onPrev: step(-1),
+        onNext: step(1),
+        onClose: () => setSelected(null),
+      }));
+
       return h('div', {
+        ref: rootRef,
         className: 'dshgit-root',
         onKeyDown: (event) => { if (event.key === 'Escape' && picker) setPicker(false); },
       },
@@ -681,8 +969,8 @@ window.__ModuleLoader__.load({
       notice !== null && h('div', { className: `dshgit-notice dshgit-notice-${notice.kind}`, role: notice.kind === 'error' ? 'alert' : 'status' },
         h('span', { className: 'dshgit-notice-text' }, notice.text),
         h('button', { type: 'button', className: 'dshgit-notice-close', 'aria-label': t('dismiss'), onClick: () => setNotice(null) }, '×')),
-      h('div', { className: 'dshgit-body' },
-        h('div', { className: 'dshgit-commit' },
+      listPane([
+        h('div', { key: 'commit', className: 'dshgit-commit' },
           h('textarea', {
             className: 'dshgit-input dshgit-message',
             rows: Math.min(8, Math.max(2, message.split('\n').length)),
@@ -718,25 +1006,25 @@ window.__ModuleLoader__.load({
             disabled,
             onClick: () => run('push', {}, 'busy.push', (v) => (v.published ? t('done.publish', { remote: v.published }) : t('done.push'))),
           }, h(IconUp), h('span', null, t('publish.button')))),
-        total === 0 && h('p', { className: 'dshgit-status-line' }, t('empty.clean')),
+        total === 0 && h('p', { key: 'clean', className: 'dshgit-status-line' }, t('empty.clean')),
         h(Group, {
-          id: 'conflicts', title: t('group.conflicts'), entries: conflicts, collapsed: collapsed.conflicts, t, disabled, renderFile,
+          key: 'conflicts', id: 'conflicts', title: t('group.conflicts'), entries: conflicts, collapsed: collapsed.conflicts, t, disabled, renderFile,
           onCollapse: () => toggleGroup('conflicts'),
           groupActions: { stage: () => run('stage', { paths: conflicts.map((c) => c.path) }, 'busy.work') },
         }),
         h(Group, {
-          id: 'staged', title: t('group.staged'), entries: staged, collapsed: collapsed.staged, t, disabled, renderFile,
+          key: 'staged', id: 'staged', title: t('group.staged'), entries: staged, collapsed: collapsed.staged, t, disabled, renderFile,
           onCollapse: () => toggleGroup('staged'),
           groupActions: { unstage: () => run('unstage', { all: true }, 'busy.work') },
         }),
         h(Group, {
-          id: 'changes', title: t('group.changes'), entries: changes, collapsed: collapsed.changes, t, disabled, renderFile,
+          key: 'changes', id: 'changes', title: t('group.changes'), entries: changes, collapsed: collapsed.changes, t, disabled, renderFile,
           onCollapse: () => toggleGroup('changes'),
           groupActions: {
             discard: () => askDiscard(changes),
             stage: () => run('stage', { paths: changes.map((c) => c.path) }, 'busy.work'),
           },
-        })),
+        })]),
       confirm !== null && h('div', { className: 'dshgit-confirm-backdrop', onClick: () => setConfirm(null) },
         h('div', {
           className: 'dshgit-confirm',
@@ -902,7 +1190,7 @@ window.__ModuleLoader__.load({
 .dshgit-primary:disabled,.dshgit-secondary:disabled{opacity:.5;cursor:default}
 .dshgit-inline{height:28px}
 .dshgit-row{display:flex;align-items:center;gap:6px;min-width:0;height:26px;padding:0 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;user-select:none}
-.dshgit-row:hover,.dshgit-row-open{background:var(--dsw-alias-interactive-bg-hover)}
+.dshgit-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshgit-group+.dshgit-group{margin-top:6px}
 .dshgit-group-head{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary);padding-left:2px}
 .dshgit-group-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -922,17 +1210,44 @@ window.__ModuleLoader__.load({
 .dshgit-letter-add{color:var(--dsw-alias-state-success-primary)}
 .dshgit-letter-del{color:var(--dsw-alias-state-error-primary)}
 .dshgit-letter-ren{color:var(--dsw-alias-state-business-primary)}
-.dshgit-diff{margin:2px 0 6px 6px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);overflow:hidden;background:var(--dsw-alias-bg-base)}
-.dshgit-diff-scroll{max-height:420px;overflow:auto}
-.dshgit-diff-note{padding:6px 10px;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dshgit-row-selected,.dshgit-row-selected:hover{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent)}
+.dshgit-split{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.dshgit-split[data-diff="side"]{flex-direction:row}
+.dshgit-split[data-diff="side"]>.dshgit-body{flex:0 0 var(--dshgit-list-width,320px);width:var(--dshgit-list-width,320px);min-width:200px}
+.dshgit-split[data-diff="stacked"]>.dshgit-body{flex:0 1 45%;min-height:120px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.dshgit-splitter{flex:none;width:5px;margin:0 -2px;position:relative;z-index:2;cursor:col-resize}
+.dshgit-splitter::after{content:"";position:absolute;top:0;bottom:0;left:2px;width:1px;background:var(--dsw-alias-border-l2);transition:background .12s}
+.dshgit-splitter:hover::after{width:2px;left:1.5px;background:var(--dsw-alias-state-business-primary)}
+.dshgit-diffpane{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base)}
+.dshgit-diffbar{box-sizing:border-box;display:flex;align-items:center;gap:4px;flex:none;height:36px;padding:0 6px 0 12px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.dshgit-diff-title{display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden}
+.dshgit-diff-title .dshgit-name{font-weight:500}
+.dshgit-chip{flex:none;padding:0 6px;height:18px;line-height:18px;border-radius:9px;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
+.dshgit-segs{display:inline-flex;flex:none;padding:2px;gap:2px;border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-2);margin-right:4px}
+.dshgit-seg{height:22px;padding:0 8px;border:none;border-radius:var(--dsw-radius-sm,6px);background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.dshgit-seg:hover{color:var(--dsw-alias-label-primary)}
+.dshgit-seg-on{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 0 0 .5px var(--dsw-alias-border-l2)}
+.dshgit-seg:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
+.dshgit-tool-on{color:var(--dsw-alias-state-business-primary)}
+.dshgit-diff-scroll{flex:1 1 auto;min-height:0;overflow:auto}
+.dshgit-diff-note{padding:8px 12px;color:var(--dsw-alias-label-tertiary);font-size:12px}
 .dshgit-diff-table{border-collapse:collapse;width:100%;font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Consolas,monospace);font-size:12px;line-height:18px}
 .dshgit-diff-table td{padding:0;vertical-align:top}
-.dshgit-diff-no{width:1%;min-width:32px;padding:0 6px!important;text-align:right;color:var(--dsw-alias-label-tertiary);user-select:none;white-space:nowrap}
-.dshgit-diff-sign{width:12px;text-align:center;user-select:none;color:var(--dsw-alias-label-tertiary)}
-.dshgit-diff-code{white-space:pre;padding-right:12px!important;color:var(--dsw-alias-label-primary)}
-.dshgit-diff-add{background:var(--dsw-alias-code-diff-added,color-mix(in srgb,var(--dsw-alias-state-success-primary) 16%,transparent))}
-.dshgit-diff-del{background:var(--dsw-alias-code-diff-deleted,color-mix(in srgb,var(--dsw-alias-state-error-primary) 16%,transparent))}
-.dshgit-diff-hunk td{color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1)}
+.dshgit-diff-no{width:1%;min-width:36px;padding:0 8px 0 6px!important;text-align:right;color:var(--dsw-alias-label-tertiary);user-select:none;white-space:nowrap}
+.dshgit-diff-sign{width:14px;text-align:center;user-select:none;color:var(--dsw-alias-label-tertiary)}
+.dshgit-diff-code{white-space:pre;padding:0 12px 0 4px!important;color:var(--dsw-alias-label-primary);tab-size:4}
+.dshgit-diff-unified .dshgit-diff-code{width:100%}
+.dshgit-diff-add,.dshgit-cell-add{background:var(--dsw-alias-code-diff-added,color-mix(in srgb,var(--dsw-alias-state-success-primary) 15%,transparent))}
+.dshgit-diff-del,.dshgit-cell-del{background:var(--dsw-alias-code-diff-deleted,color-mix(in srgb,var(--dsw-alias-state-error-primary) 15%,transparent))}
+.dshgit-cell-empty{background:repeating-linear-gradient(-45deg,transparent 0 4px,color-mix(in srgb,var(--dsw-alias-label-tertiary) 9%,transparent) 4px 5px)}
+.dshgit-diff-add .dshgit-inline,.dshgit-cell-add .dshgit-inline{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 38%,transparent);color:inherit;border-radius:2px}
+.dshgit-diff-del .dshgit-inline,.dshgit-cell-del .dshgit-inline{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 38%,transparent);color:inherit;border-radius:2px}
+.dshgit-diff-hunk td{padding:2px 12px!important;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1);white-space:pre;overflow:hidden;text-overflow:ellipsis}
+.dshgit-diff-split{table-layout:fixed}
+.dshgit-diff-split .dshgit-col-no{width:46px}
+.dshgit-diff-split th{position:sticky;top:0;z-index:1;padding:4px 10px;text-align:left;font-weight:500;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border-bottom:.5px solid var(--dsw-alias-border-l2);font-family:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshgit-split-right{border-left:.5px solid var(--dsw-alias-border-l2)}
+.dshgit-wrap .dshgit-diff-split .dshgit-diff-code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-all}
 .dshgit-progress{position:relative;display:flex;align-items:center;gap:6px;flex:none;padding:4px 14px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow:hidden}
 .dshgit-progress-bar{position:absolute;left:0;top:0;height:2px;width:30%;background:var(--dsw-alias-state-business-primary);animation:dshgit-slide 1.1s ease-in-out infinite}
 @keyframes dshgit-slide{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
