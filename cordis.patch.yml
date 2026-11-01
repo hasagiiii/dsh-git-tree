@@ -1,0 +1,7 @@
+# dsh-git-tree: Source Control tab in the right sidebar and Git markers on
+# workspace rows. One row; the Host half registers the git route, the Client
+# half draws the tab and the markers.
+- insert:
+    - id: dsh-git-tree
+      name: dsh-git-tree
+      config: {}

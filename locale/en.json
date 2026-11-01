@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Source Control",
+    "description": "A VS Code-style Source Control tab in the right sidebar — review, stage, discard and diff changes, commit, switch branches, pull, push and sync — and a marker on every workspace in the left sidebar that has uncommitted files."
+  }
+}
