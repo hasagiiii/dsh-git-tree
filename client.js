@@ -447,8 +447,112 @@ window.__ModuleLoader__.load({
       return [parts[0], h('mark', { key: 'm', className: 'dshgit-inline' }, parts[1]), parts[2]];
     }
 
-    function UnifiedTable({ hunks }) {
+    /* ------------------------------------------------------------------ */
+    /* Syntax highlighting                                                 */
+    /* ------------------------------------------------------------------ */
+
+    /*
+     * The Harness ships Shiki in its baseline module table: `useCodeHighlighter`
+     * lazy-loads grammars and colours tokens with the theme's --shiki-token-*
+     * variables, so light and dark themes both work. If a future Harness drops
+     * either export, the diff silently falls back to plain text.
+     */
+    let primitives;
+    try { primitives = require('@deepseek-ai/dsh-client-ui-primitives'); } catch { primitives = undefined; }
+    const noHighlight = () => undefined;
+    const useHighlighter = typeof primitives?.useCodeHighlighter === 'function'
+      ? (lang) => primitives.useCodeHighlighter(lang)
+      : () => noHighlight;
+    const MAX_HIGHLIGHT_CHARS = 400_000;
+    const MAX_HIGHLIGHT_LINES = 8_000;
+
+    const BASENAME_LANGS = [
+      [/^(gnu)?makefile$/i, 'make'],
+      [/^cmakelists\.txt$/i, 'cmake'],
+      [/^(gemfile|rakefile|podfile|vagrantfile)$/i, 'ruby'],
+      [/^\.(bashrc|bash_profile|zshrc|profile)$/i, 'shellscript'],
+      [/^\.env(\..+)?$/i, 'dotenv'],
+      [/^\.?(editorconfig|gitconfig|npmrc)$/i, 'ini'],
+      [/^jenkinsfile$/i, 'groovy'],
+    ];
+
+    /** Shiki language id for a repository path, or undefined for plain text. */
+    function languageOf(file) {
+      const name = baseName(file);
+      for (const [pattern, lang] of BASENAME_LANGS) if (pattern.test(name)) return lang;
+      try {
+        return typeof primitives?.languageForPath === 'function' ? primitives.languageForPath(name) : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+
+    /**
+     * Tokens per diff line. Each hunk's old side (context + deletions) and new
+     * side (context + additions) is tokenized as one block, so multi-line
+     * comments and strings keep their state across lines.
+     * @returns {{ old: WeakMap<object, object[]>, new: WeakMap<object, object[]> }}
+     */
+    function tokenizeHunks(hunks, highlight) {
+      const maps = { old: new WeakMap(), new: new WeakMap() };
+      if (highlight === noHighlight || hunks.length === 0) return maps;
+      let chars = 0;
+      let count = 0;
+      for (const hunk of hunks) for (const line of hunk.lines) { chars += line.text.length + 1; count += 1; }
+      if (chars > MAX_HIGHLIGHT_CHARS || count > MAX_HIGHLIGHT_LINES) return maps;
+      for (const hunk of hunks) {
+        for (const [side, skip] of [['old', 'add'], ['new', 'del']]) {
+          const lines = hunk.lines.filter((line) => line.kind !== skip);
+          if (lines.length === 0) continue;
+          let tokens;
+          try { tokens = highlight(lines.map((line) => line.text).join('\n')); } catch { tokens = undefined; }
+          if (!Array.isArray(tokens)) continue;
+          lines.forEach((line, i) => { if (Array.isArray(tokens[i])) maps[side].set(line, tokens[i]); });
+        }
+      }
+      return maps;
+    }
+
+    /** One code cell: syntax colours, with the intra-line change span wrapped in <mark>. */
+    function renderCode(text, tokens, parts) {
+      if (text === '') return ' ';
+      if (!tokens || tokens.map((token) => token.text).join('') !== text) return codeContent(text, parts);
+      const markStart = parts && parts[1] !== '' ? parts[0].length : -1;
+      const markEnd = markStart >= 0 ? markStart + parts[1].length : -1;
+      const pieces = [];
+      let pos = 0;
+      for (const token of tokens) {
+        const value = token.text;
+        let s = 0;
+        while (s < value.length) {
+          const abs = pos + s;
+          let cut = value.length;
+          for (const boundary of [markStart, markEnd]) {
+            if (boundary > abs && boundary < pos + value.length) cut = Math.min(cut, boundary - pos);
+          }
+          pieces.push({ text: value.slice(s, cut), style: token.style, marked: markStart >= 0 && abs >= markStart && abs < markEnd });
+          s = cut;
+        }
+        pos += value.length;
+      }
+      const out = [];
+      for (let i = 0; i < pieces.length;) {
+        if (pieces[i].marked) {
+          const group = [];
+          while (i < pieces.length && pieces[i].marked) group.push(pieces[i++]);
+          out.push(h('mark', { key: `m${out.length}`, className: 'dshgit-inline' },
+            group.map((piece, j) => h('span', { key: j, style: piece.style }, piece.text))));
+        } else {
+          const piece = pieces[i++];
+          out.push(h('span', { key: `s${out.length}`, style: piece.style }, piece.text));
+        }
+      }
+      return out;
+    }
+
+    function UnifiedTable({ hunks, tokens }) {
       const rows = [];
+      const tok = (line) => (line.kind === 'del' ? tokens.old.get(line) : tokens.new.get(line) ?? tokens.old.get(line));
       hunks.forEach((hunk, hi) => {
         rows.push(h('tr', { key: `h${hi}`, className: 'dshgit-diff-hunk' }, h('td', { colSpan: 4 }, hunk.header)));
         blocksOf(hunk.lines).forEach((block, bi) => {
@@ -456,7 +560,7 @@ window.__ModuleLoader__.load({
             const l = block.line;
             rows.push(h('tr', { key: `${hi}:${bi}`, className: 'dshgit-diff-ctx' },
               h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-no' }, l.b),
-              h('td', { className: 'dshgit-diff-sign' }), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text))));
+              h('td', { className: 'dshgit-diff-sign' }), h('td', { className: 'dshgit-diff-code' }, renderCode(l.text, tok(l)))));
             return;
           }
           const pairs = Math.min(block.dels.length, block.adds.length);
@@ -464,23 +568,24 @@ window.__ModuleLoader__.load({
           for (let k = 0; k < pairs; k += 1) spans.push(inlineSpan(block.dels[k].text, block.adds[k].text));
           block.dels.forEach((l, k) => rows.push(h('tr', { key: `${hi}:${bi}:d${k}`, className: 'dshgit-diff-del' },
             h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-no' }),
-            h('td', { className: 'dshgit-diff-sign' }, '-'), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text, spans[k]?.a)))));
+            h('td', { className: 'dshgit-diff-sign' }, '-'), h('td', { className: 'dshgit-diff-code' }, renderCode(l.text, tok(l), spans[k]?.a)))));
           block.adds.forEach((l, k) => rows.push(h('tr', { key: `${hi}:${bi}:a${k}`, className: 'dshgit-diff-add' },
             h('td', { className: 'dshgit-diff-no' }), h('td', { className: 'dshgit-diff-no' }, l.b),
-            h('td', { className: 'dshgit-diff-sign' }, '+'), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text, spans[k]?.b)))));
+            h('td', { className: 'dshgit-diff-sign' }, '+'), h('td', { className: 'dshgit-diff-code' }, renderCode(l.text, tok(l), spans[k]?.b)))));
         });
       });
       return h('table', { className: 'dshgit-diff-table dshgit-diff-unified' }, h('tbody', null, rows));
     }
 
-    function SplitTable({ hunks, leftLabel, rightLabel }) {
+    function SplitTable({ hunks, tokens, leftLabel, rightLabel }) {
       const rows = [];
       const side = (line, kind, parts, key) => {
         const edge = key === 'r' ? ' dshgit-split-right' : '';
         const cell = line ? `dshgit-cell-${kind}` : 'dshgit-cell-empty';
+        const map = kind === 'add' ? tokens.new : tokens.old;
         return [
           h('td', { key: `${key}n`, className: `dshgit-diff-no ${cell}${edge}` }, line ? (kind === 'add' ? line.b : line.a) : null),
-          h('td', { key: `${key}c`, className: `dshgit-diff-code ${cell}` }, line ? codeContent(line.text, parts) : null),
+          h('td', { key: `${key}c`, className: `dshgit-diff-code ${cell}` }, line ? renderCode(line.text, map.get(line), parts) : null),
         ];
       };
       hunks.forEach((hunk, hi) => {
@@ -489,8 +594,8 @@ window.__ModuleLoader__.load({
           if (block.type === 'ctx') {
             const l = block.line;
             rows.push(h('tr', { key: `${hi}:${bi}` },
-              h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text)),
-              h('td', { className: 'dshgit-diff-no dshgit-split-right' }, l.b), h('td', { className: 'dshgit-diff-code' }, codeContent(l.text))));
+              h('td', { className: 'dshgit-diff-no' }, l.a), h('td', { className: 'dshgit-diff-code' }, renderCode(l.text, tokens.old.get(l))),
+              h('td', { className: 'dshgit-diff-no dshgit-split-right' }, l.b), h('td', { className: 'dshgit-diff-code' }, renderCode(l.text, tokens.new.get(l)))));
             return;
           }
           const n = Math.max(block.dels.length, block.adds.length);
@@ -526,6 +631,12 @@ window.__ModuleLoader__.load({
         return () => { live = false; };
       }, [cwd, entry.path, entry.orig, entry.status, group, untracked, full, stamp]);
 
+      const lang = languageOf(entry.path);
+      const highlight = useHighlighter(lang);
+      const diffText = state.phase === 'ready' && !state.value.binary ? state.value.text : '';
+      const hunks = useMemo(() => parseDiff(diffText), [diffText]);
+      const tokens = useMemo(() => tokenizeHunks(hunks, lang === undefined ? noHighlight : highlight), [hunks, highlight, lang]);
+
       const letter = statusLetter(entry, group);
       const revs = group === 'staged'
         ? [entry.status === 'A' ? t('rev.none') : 'HEAD', entry.status === 'D' ? t('rev.none') : t('rev.index')]
@@ -540,7 +651,6 @@ window.__ModuleLoader__.load({
       else if (state.phase === 'error') content = h('div', { className: 'dshgit-diff-note dshgit-error-text' }, errorText(t, state.error));
       else if (state.value.binary) content = h('div', { className: 'dshgit-diff-note' }, t('diff.binary'));
       else {
-        const hunks = parseDiff(state.value.text);
         if (hunks.length === 0) {
           const renamed = /^rename from /m.test(state.value.text) || entry.orig !== undefined;
           const modeOnly = /^old mode /m.test(state.value.text);
@@ -549,7 +659,7 @@ window.__ModuleLoader__.load({
         else {
           content = h(React.Fragment, null,
             state.value.truncated && h('div', { className: 'dshgit-diff-note' }, t('diff.truncated')),
-            mode === 'split' ? h(SplitTable, { hunks, leftLabel, rightLabel: revs[1] }) : h(UnifiedTable, { hunks }));
+            mode === 'split' ? h(SplitTable, { hunks, tokens, leftLabel, rightLabel: revs[1] }) : h(UnifiedTable, { hunks, tokens }));
         }
       }
 
@@ -567,6 +677,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dshgit-name' }, baseName(entry.path)),
             dirName(entry.path) !== '' && h('span', { className: 'dshgit-dir' }, dirName(entry.path))),
           h('span', { className: 'dshgit-chip' }, chip),
+          lang !== undefined && h('span', { className: 'dshgit-chip dshgit-chip-lang' }, lang),
           h('span', { className: 'dshgit-spacer' }),
           h('span', { className: 'dshgit-segs', role: 'group', 'aria-label': t('diff.mode') }, seg('unified', t('diff.unified')), seg('split', t('diff.split'))),
           h(ToolButton, { label: t('diff.fullTitle'), onClick: () => setFull(!full), className: full ? 'dshgit-tool-on' : '' }, h(IconExpand)),
@@ -1223,6 +1334,7 @@ window.__ModuleLoader__.load({
 .dshgit-diff-title{display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden}
 .dshgit-diff-title .dshgit-name{font-weight:500}
 .dshgit-chip{flex:none;padding:0 6px;height:18px;line-height:18px;border-radius:9px;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
+.dshgit-chip-lang{font-family:var(--dsw-font-mono,ui-monospace,monospace);color:var(--dsw-alias-label-tertiary)}
 .dshgit-segs{display:inline-flex;flex:none;padding:2px;gap:2px;border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-2);margin-right:4px}
 .dshgit-seg{height:22px;padding:0 8px;border:none;border-radius:var(--dsw-radius-sm,6px);background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .dshgit-seg:hover{color:var(--dsw-alias-label-primary)}
@@ -1235,7 +1347,7 @@ window.__ModuleLoader__.load({
 .dshgit-diff-table td{padding:0;vertical-align:top}
 .dshgit-diff-no{width:1%;min-width:36px;padding:0 8px 0 6px!important;text-align:right;color:var(--dsw-alias-label-tertiary);user-select:none;white-space:nowrap}
 .dshgit-diff-sign{width:14px;text-align:center;user-select:none;color:var(--dsw-alias-label-tertiary)}
-.dshgit-diff-code{white-space:pre;padding:0 12px 0 4px!important;color:var(--dsw-alias-label-primary);tab-size:4}
+.dshgit-diff-code{white-space:pre;padding:0 12px 0 4px!important;color:var(--shiki-foreground,var(--dsw-alias-label-primary));tab-size:4}
 .dshgit-diff-unified .dshgit-diff-code{width:100%}
 .dshgit-diff-add,.dshgit-cell-add{background:var(--dsw-alias-code-diff-added,color-mix(in srgb,var(--dsw-alias-state-success-primary) 15%,transparent))}
 .dshgit-diff-del,.dshgit-cell-del{background:var(--dsw-alias-code-diff-deleted,color-mix(in srgb,var(--dsw-alias-state-error-primary) 15%,transparent))}

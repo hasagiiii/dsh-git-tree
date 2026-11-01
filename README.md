@@ -12,6 +12,7 @@ Git Source Control for the DeepSeek Harness Web UI.
   - Merge Changes, Staged Changes and Changes groups, with per-file and per-group stage, unstage and discard, and Open File (also on double-click).
   - **Diff pane to the right of the change list.** Click a file to open it; ↑/↓ moves through files.
     - **Side by side** (default) or **Inline**, with intra-line highlighting of the changed span.
+    - **Syntax highlighting** comes from the Shiki highlighter the Harness already ships (`useCodeHighlighter` in its baseline module table). Colours follow the light/dark theme's `--shiki-token-*` variables. The language is chosen by file extension, covering about 60 languages including TS/JS, Python, Go, Rust, Java, C/C++, C#, Kotlin, Swift, PHP, Ruby, shell, PowerShell, YAML, TOML, JSON, Markdown, HTML, CSS/SCSS, SQL, Vue and Svelte, plus common bare file names such as Makefile, Dockerfile-style dotfiles and `.env`. Grammars load lazily on first use. Each hunk side is tokenized as one block, so multi-line comments and strings stay correct. Very large diffs (more than 8000 lines) fall back to plain text.
     - Whole-file context toggle, previous/next file, open, and close.
     - The divider can be dragged (double-click resets it). Below 560 px the pane stacks under the list instead.
     - The mode, whole-file setting and list width are remembered.
